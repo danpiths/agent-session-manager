@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          platforms=(
+            "darwin/amd64"
+            "darwin/arm64"
+            "linux/amd64"
+            "linux/arm64"
+            "windows/amd64"
+          )
+          for platform in "${platforms[@]}"; do
+            GOOS="${platform%/*}"
+            GOARCH="${platform#*/}"
+            output="dist/agent-session-manager-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then
+              output="${output}.exe"
+            fi
+            echo "Building $GOOS/$GOARCH..."
+            GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-s -w" -o "$output" .
+          done
+
+      - name: Generate release body
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          {
+            echo "## What's Changed"
+            echo ""
+
+            # Categorize commits
+            if PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null); then
+              RANGE="${PREV_TAG}..HEAD"
+              CHANGELOG_LINK="${PREV_TAG}...${TAG_NAME}"
+            else
+              RANGE="HEAD"
+              CHANGELOG_LINK=""
+            fi
+
+            features=""
+            fixes=""
+            other=""
+
+            while IFS= read -r line; do
+              msg=$(echo "$line" | sed 's/^- //')
+              if echo "$msg" | grep -qiE '^feat(\(|:|\!)'; then
+                features="${features}\n- ${msg}"
+              elif echo "$msg" | grep -qiE '^fix(\(|:|\!)'; then
+                fixes="${fixes}\n- ${msg}"
+              else
+                other="${other}\n- ${msg}"
+              fi
+            done < <(git log "$RANGE" --pretty=format:"- %s by @%an in %h" 2>/dev/null)
+
+            if [ -n "$features" ]; then
+              echo "### New Features"
+              echo ""
+              echo -e "$features"
+              echo ""
+            fi
+
+            if [ -n "$fixes" ]; then
+              echo "### Bug Fixes"
+              echo ""
+              echo -e "$fixes"
+              echo ""
+            fi
+
+            if [ -n "$other" ]; then
+              echo "### Other Changes"
+              echo ""
+              echo -e "$other"
+              echo ""
+            fi
+
+            if [ -n "$CHANGELOG_LINK" ]; then
+              echo "**Full Changelog:** https://github.com/danpiths/agent-session-manager/compare/${CHANGELOG_LINK}"
+              echo ""
+            fi
+
+            echo "---"
+            echo ""
+            echo "## Install"
+            echo ""
+            echo "### macOS"
+            echo ""
+            echo '```bash'
+            echo "# Apple Silicon"
+            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-darwin-arm64 -o agent-session-manager"
+            echo "# Intel"
+            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-darwin-amd64 -o agent-session-manager"
+            echo ""
+            echo "chmod +x agent-session-manager"
+            echo '```'
+            echo ""
+            echo "### Linux"
+            echo ""
+            echo '```bash'
+            echo "# x86_64"
+            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-linux-amd64 -o agent-session-manager"
+            echo "# ARM64"
+            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-linux-arm64 -o agent-session-manager"
+            echo ""
+            echo "chmod +x agent-session-manager"
+            echo '```'
+            echo ""
+            echo "### Windows"
+            echo ""
+            echo 'Download `agent-session-manager-windows-amd64.exe` from the assets below.'
+            echo ""
+            echo "### Go install"
+            echo ""
+            echo '```bash'
+            echo "go install github.com/danpiths/agent-session-manager@${TAG_NAME}"
+            echo '```'
+          } > release_body.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_body.md
+          files: dist/*
