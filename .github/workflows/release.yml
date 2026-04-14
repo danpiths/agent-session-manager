@@ -103,34 +103,34 @@ jobs:
             echo ""
             echo "## Install"
             echo ""
-            echo "### macOS"
+            echo "Pick your platform and run one command:"
             echo ""
+            echo "**macOS (Apple Silicon)**"
             echo '```bash'
-            echo "# Apple Silicon"
-            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-darwin-arm64 -o agent-session-manager"
-            echo "# Intel"
-            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-darwin-amd64 -o agent-session-manager"
-            echo ""
-            echo "chmod +x agent-session-manager"
+            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-darwin-arm64 -o /usr/local/bin/agent-session-manager && chmod +x /usr/local/bin/agent-session-manager"
             echo '```'
             echo ""
-            echo "### Linux"
-            echo ""
+            echo "**macOS (Intel)**"
             echo '```bash'
-            echo "# x86_64"
-            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-linux-amd64 -o agent-session-manager"
-            echo "# ARM64"
-            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-linux-arm64 -o agent-session-manager"
-            echo ""
-            echo "chmod +x agent-session-manager"
+            echo "curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-darwin-amd64 -o /usr/local/bin/agent-session-manager && chmod +x /usr/local/bin/agent-session-manager"
             echo '```'
             echo ""
-            echo "### Windows"
+            echo "**Linux (x86_64)**"
+            echo '```bash'
+            echo "sudo curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-linux-amd64 -o /usr/local/bin/agent-session-manager && sudo chmod +x /usr/local/bin/agent-session-manager"
+            echo '```'
             echo ""
-            echo 'Download `agent-session-manager-windows-amd64.exe` from the assets below.'
+            echo "**Linux (ARM64)**"
+            echo '```bash'
+            echo "sudo curl -L https://github.com/danpiths/agent-session-manager/releases/download/${TAG_NAME}/agent-session-manager-linux-arm64 -o /usr/local/bin/agent-session-manager && sudo chmod +x /usr/local/bin/agent-session-manager"
+            echo '```'
             echo ""
-            echo "### Go install"
+            echo "**Windows (PowerShell)**"
+            echo '```powershell'
+            echo 'Invoke-WebRequest -Uri https://github.com/danpiths/agent-session-manager/releases/download/'"${TAG_NAME}"'/agent-session-manager-windows-amd64.exe -OutFile "$env:LOCALAPPDATA\Microsoft\WindowsApps\agent-session-manager.exe"'
+            echo '```'
             echo ""
+            echo "**Go install**"
             echo '```bash'
             echo "go install github.com/danpiths/agent-session-manager@${TAG_NAME}"
             echo '```'

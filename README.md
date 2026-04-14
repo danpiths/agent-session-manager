@@ -15,25 +15,34 @@ used from [Bifrost](https://github.com/maximhq/bifrost).
 
 ### Download a binary
 
-Grab the latest binary for your platform from the [Releases page](https://github.com/danpiths/agent-session-manager/releases/latest):
+Pick your platform and run one command — it downloads the binary and installs it to your PATH:
 
+**macOS (Apple Silicon)**
 ```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-darwin-arm64 -o agent-session-manager
-
-# macOS (Intel)
-curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-darwin-amd64 -o agent-session-manager
-
-# Linux (x86_64)
-curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-linux-amd64 -o agent-session-manager
-
-# Linux (ARM64)
-curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-linux-arm64 -o agent-session-manager
-
-chmod +x agent-session-manager
+curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-darwin-arm64 -o /usr/local/bin/agent-session-manager && chmod +x /usr/local/bin/agent-session-manager
 ```
 
-On Windows, download `agent-session-manager-windows-amd64.exe` from the [Releases page](https://github.com/danpiths/agent-session-manager/releases/latest).
+**macOS (Intel)**
+```bash
+curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-darwin-amd64 -o /usr/local/bin/agent-session-manager && chmod +x /usr/local/bin/agent-session-manager
+```
+
+**Linux (x86_64)**
+```bash
+sudo curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-linux-amd64 -o /usr/local/bin/agent-session-manager && sudo chmod +x /usr/local/bin/agent-session-manager
+```
+
+**Linux (ARM64)**
+```bash
+sudo curl -L https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-linux-arm64 -o /usr/local/bin/agent-session-manager && sudo chmod +x /usr/local/bin/agent-session-manager
+```
+
+**Windows (PowerShell)**
+```powershell
+Invoke-WebRequest -Uri https://github.com/danpiths/agent-session-manager/releases/latest/download/agent-session-manager-windows-amd64.exe -OutFile "$env:LOCALAPPDATA\Microsoft\WindowsApps\agent-session-manager.exe"
+```
+
+Then run `agent-session-manager` from any terminal.
 
 ### Go install
 
