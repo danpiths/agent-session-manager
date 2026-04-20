@@ -37,6 +37,7 @@ func AllProviders() []SessionProvider {
 	return []SessionProvider{
 		&ClaudeProvider{},
 		&CodexProvider{},
+		&ForgeProvider{},
 	}
 }
 
