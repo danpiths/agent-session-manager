@@ -14,11 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var (
-	forgeCurrentWorkingDirRE = regexp.MustCompile(`(?s)<current_working_directory>(.*?)</current_working_directory>`)
-	forgeCommandTraceRE      = regexp.MustCompile(`(?s)<command_trace>(.*?)</command_trace>`)
-	forgeCDCommandRE         = regexp.MustCompile(`<command exit_code="\d+">cd\s+([^<]+)</command>`)
-)
+var forgeCurrentWorkingDirRE = regexp.MustCompile(`(?s)<current_working_directory>(.*?)</current_working_directory>`)
 
 // ForgeProvider reads sessions from ~/.config/forgecode/.forge.db.
 type ForgeProvider struct{}
@@ -233,47 +229,18 @@ func forgeNormalizeRole(role string) string {
 }
 
 func forgeProjectPath(messages []forgeContextMessage) string {
-	cwd := ""
+	// Use the initial working directory where the conversation was started,
+	// not the last directory navigated to via cd commands.
 	for _, msg := range messages {
 		_, content := forgeMessageText(msg)
 		if content == "" {
 			continue
 		}
 
-		if cwd == "" {
-			if match := forgeCurrentWorkingDirRE.FindStringSubmatch(content); len(match) == 2 {
-				cwd = strings.TrimSpace(match[1])
-			}
-		}
-
-		for _, traceMatch := range forgeCommandTraceRE.FindAllStringSubmatch(content, -1) {
-			if len(traceMatch) != 2 {
-				continue
-			}
-			cwd = forgeApplyCDTrace(cwd, traceMatch[1])
+		if match := forgeCurrentWorkingDirRE.FindStringSubmatch(content); len(match) == 2 {
+			return strings.TrimSpace(match[1])
 		}
 	}
-	return cwd
+	return ""
 }
 
-func forgeApplyCDTrace(cwd, trace string) string {
-	for _, match := range forgeCDCommandRE.FindAllStringSubmatch(trace, -1) {
-		if len(match) != 2 {
-			continue
-		}
-		target := strings.TrimSpace(match[1])
-		if target == "" {
-			continue
-		}
-		if filepath.IsAbs(target) {
-			cwd = filepath.Clean(target)
-			continue
-		}
-		if cwd == "" {
-			cwd = target
-			continue
-		}
-		cwd = filepath.Clean(filepath.Join(cwd, target))
-	}
-	return cwd
-}
