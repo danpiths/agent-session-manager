@@ -67,6 +67,7 @@ go build -o agent-session-manager .
 # Skip picker, go straight to a provider
 ./agent-session-manager --provider claude
 ./agent-session-manager --provider codex
+./agent-session-manager --provider forge
 ```
 
 The `--provider` flag matches against provider names case-insensitively.
@@ -94,6 +95,7 @@ The `--provider` flag matches against provider names case-insensitively.
 provider.go   ← SessionProvider interface, shared types, registry
 claude.go     ← Claude Code provider implementation
 codex.go      ← Codex provider implementation
+forge.go      ← Forge Code provider implementation
 main.go       ← Bubbletea UI (model, update, view, helpers)
 ```
 
@@ -151,6 +153,19 @@ from the interface.
   messages as a `message.content` string).
 - Projects are grouped by `cwd` from the session metadata.
 - Rename is not supported (no slug field in the format).
+
+**`forge.go` — Forge Code**
+
+- Reads from the SQLite database at `~/.config/forgecode/.forge.db`.
+- Queries the `conversations` table for `conversation_id`, `title`,
+  `workspace_id`, `context`, `created_at`, and `updated_at`.
+- The `context` column is a JSON blob containing the conversation messages.
+  Each message has a `message.text` object with `role` and `content` fields.
+- The project path is extracted from the `<current_working_directory>` tag in
+  the first system message, identifying where the conversation was started.
+- Projects are grouped by workspace ID and project path.
+- Rename is supported — updates the `title` column in the database.
+- Delete removes the row from the `conversations` table.
 
 ### UI layer (`main.go`)
 
@@ -242,6 +257,7 @@ func AllProviders() []SessionProvider {
     return []SessionProvider{
         &ClaudeProvider{},
         &CodexProvider{},
+        &ForgeProvider{},
         &CursorProvider{},  // ← add here
     }
 }
@@ -277,6 +293,7 @@ That's it. The picker, title, keybindings, and preview all adapt automatically.
 | ----------- | ------------------------------------------------------------------ | ---------------------- |
 | Claude Code | `~/.claude/projects/<encoded-path>/*.jsonl`                        | JSONL, one per session |
 | Codex       | `~/.codex/sessions/YYYY/MM/DD/*.jsonl`                             | JSONL, one per session |
+| Forge Code  | `~/.config/forgecode/.forge.db`                                    | SQLite database        |
 | Cursor      | `~/.cursor/` or `~/Library/Application Support/Cursor/`            | Varies                 |
 | Windsurf    | `~/.windsurf/` or `~/Library/Application Support/Windsurf/`        | Varies                 |
 | Aider       | `~/.aider.chat.history.md` or `.aider.chat.history.md` per project | Markdown               |
@@ -288,6 +305,7 @@ That's it. The picker, title, keybindings, and preview all adapt automatically.
 | `charm.land/bubbletea/v2`         | TUI framework (model-update-view)              |
 | `charm.land/lipgloss/v2`          | Terminal styling and layout                    |
 | `github.com/charmbracelet/x/ansi` | ANSI-aware string truncation (`ansi.Truncate`) |
+| `modernc.org/sqlite`              | Pure-Go SQLite driver (for Forge Code)         |
 
 All other dependencies are transitive.
 
