@@ -12,11 +12,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -44,6 +44,7 @@ jobs:
       - name: Generate release body
         env:
           TAG_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           {
             echo "## What's Changed"
@@ -62,8 +63,14 @@ jobs:
             fixes=""
             other=""
 
-            while IFS= read -r line; do
-              msg=$(echo "$line" | sed 's/^- //')
+            while IFS= read -r sha; do
+              subject=$(git show -s --format=%s "$sha")
+              author=$(git show -s --format=%an "$sha")
+              login=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}" --jq '.author.login // empty')
+              if [ -n "$login" ]; then
+                author="@${login}"
+              fi
+              msg="${subject} by ${author} in $(git rev-parse --short "$sha")"
               if echo "$msg" | grep -qiE '^feat(\(|:|\!)'; then
                 features="${features}\n- ${msg}"
               elif echo "$msg" | grep -qiE '^fix(\(|:|\!)'; then
@@ -71,7 +78,7 @@ jobs:
               else
                 other="${other}\n- ${msg}"
               fi
-            done < <(git log "$RANGE" --pretty=format:"- %s by @%an in %h" 2>/dev/null)
+            done < <(git log "$RANGE" --format=%H)
 
             if [ -n "$features" ]; then
               echo "### New Features"
@@ -137,7 +144,7 @@ jobs:
           } > release_body.md
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: release_body.md
           files: dist/*
