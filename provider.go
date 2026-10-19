@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -9,6 +12,8 @@ import (
 // To add a new provider, create a new file (e.g. cursor.go), implement this
 // interface, and register it in AllProviders() below.
 type SessionProvider interface {
+	// ID is the short name accepted by command-line provider selection.
+	ID() string
 	// Name returns the display name shown in the picker and title bar.
 	Name() string
 
@@ -29,6 +34,31 @@ type SessionProvider interface {
 
 	// CanRename reports whether this provider supports session renaming.
 	CanRename() bool
+
+	// CaptureSession snapshots native state and builds portable structured history.
+	CaptureSession(session Session) (SessionTransfer, error)
+	CanImport() bool
+	// ImportSession restores its own native format or translates another provider.
+	ImportSession(transfer SessionTransfer, home string, duplicate bool) (duplicateResult, error)
+}
+
+func findProvider(name string) (SessionProvider, error) {
+	for _, p := range AllProviders() {
+		if strings.EqualFold(name, p.ID()) || strings.EqualFold(name, p.Name()) || strings.EqualFold(name, strings.ReplaceAll(p.Name(), " ", "-")) {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown provider %q", name)
+}
+
+func importProviders() []SessionProvider {
+	var providers []SessionProvider
+	for _, p := range AllProviders() {
+		if p.CanImport() {
+			providers = append(providers, p)
+		}
+	}
+	return providers
 }
 
 // AllProviders returns every registered provider in display order.
@@ -51,14 +81,46 @@ type Session struct {
 	Timestamp    time.Time
 	Messages     []ChatMessage
 	FilePath     string
-	FirstMessage string // fallback display name when slug is empty
-	ProviderName string // set by the loader, used for display
+	FirstMessage string           // fallback display name when slug is empty
+	ProviderName string           // set by the loader, used for display
+	History      []ChatMessage    `json:",omitempty"` // full portable history, including tools and instructions
+	Tools        []ToolDefinition `json:",omitempty"`
+}
+
+type ToolDefinition struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
 }
 
 type ChatMessage struct {
 	Role      string
 	Content   string
 	Timestamp time.Time
+	Blocks    []ContentBlock `json:",omitempty"`
+	Model     string         `json:",omitempty"`
+	Phase     string         `json:",omitempty"`
+}
+
+// ContentBlock represents transferable content without a harness's wire format.
+type ContentBlock struct {
+	Kind      string
+	Format    string          `json:",omitempty"`
+	Text      string          `json:",omitempty"`
+	ID        string          `json:",omitempty"`
+	Name      string          `json:",omitempty"`
+	Arguments json.RawMessage `json:",omitempty"`
+	Data      string          `json:",omitempty"`
+	MediaType string          `json:",omitempty"`
+	URL       string          `json:",omitempty"`
+	IsError   bool            `json:",omitempty"`
+	Children  []ContentBlock  `json:",omitempty"`
+}
+
+type SessionTransfer struct {
+	Session  Session
+	Native   map[string][]byte
+	Warnings []string
 }
 
 type Project struct {
@@ -73,9 +135,9 @@ func (s Session) DisplayName() string {
 		return s.Slug
 	}
 	if s.FirstMessage != "" {
-		name := s.FirstMessage
-		if len(name) > 50 {
-			name = name[:47] + "..."
+		name := strings.Join(strings.Fields(s.FirstMessage), " ")
+		if len([]rune(name)) > 50 {
+			name = string([]rune(name)[:47]) + "..."
 		}
 		return name
 	}
@@ -99,8 +161,8 @@ func sortProjects(projects []Project) {
 }
 
 func truncateStr(s string, maxLen int) string {
-	if len(s) > maxLen {
-		return s[:maxLen]
+	if len([]rune(s)) > maxLen {
+		return string([]rune(s)[:maxLen])
 	}
 	return s
 }
