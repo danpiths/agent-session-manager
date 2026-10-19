@@ -26,6 +26,8 @@ const (
 	modeNormal
 	modeConfirmDelete
 	modeRename
+	modeDuplicate
+	modeResult
 )
 
 // ── Theme ───────────────────────────────────────────────────────────
@@ -90,10 +92,19 @@ type model struct {
 	isDark        bool
 	th            theme
 	err           error
+	exportDir     string
+	marked        map[string]bool
+	busy          bool
+	result        string
+	resultScroll  int
 }
 
 type reloadMsg struct{}
 type statusClearMsg struct{}
+type actionResultMsg struct {
+	text string
+	err  error
+}
 
 func initialModel(providerFlag string) model {
 	providers := AllProviders()
@@ -103,11 +114,13 @@ func initialModel(providerFlag string) model {
 		mode:      modePickProvider,
 	}
 	m.th = newTheme(m.isDark)
+	m.exportDir, m.err = os.Getwd()
+	m.marked = make(map[string]bool)
 
 	// If --provider flag matches a registered provider name, skip the picker
 	if providerFlag != "" {
 		for i, p := range providers {
-			if strings.EqualFold(p.Name(), providerFlag) {
+			if strings.EqualFold(p.Name(), providerFlag) || strings.EqualFold(p.ID(), providerFlag) {
 				m.provider = p
 				m.pickerCursor = i
 				m.mode = modeNormal
@@ -145,6 +158,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.previewScroll = min(m.previewScroll, m.maxPreviewScroll())
 		return m, nil
 
 	case reloadMsg:
@@ -171,6 +185,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = ""
 		}
 		return m, nil
+	case actionResultMsg:
+		m.busy = false
+		m.mode = modeResult
+		m.result = msg.text
+		m.resultScroll = 0
+		if msg.err != nil {
+			m.result = "Action failed\n\n" + msg.err.Error()
+		}
+		return m, nil
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -187,6 +210,39 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	if m.mode == modePickProvider {
 		return m.handlePickProvider(key)
+	}
+	if m.busy {
+		return m, nil
+	}
+	if m.mode == modeResult {
+		if key == "enter" || key == "esc" {
+			m.mode = modeNormal
+		}
+		lines := strings.Split(wordWrap(m.result, max(1, m.width-4)), "\n")
+		limit := max(0, len(lines)-max(1, m.height-4))
+		switch key {
+		case "j", "down":
+			m.resultScroll = min(limit, m.resultScroll+1)
+		case "k", "up":
+			m.resultScroll = max(0, m.resultScroll-1)
+		case "ctrl+d", "pgdown":
+			m.resultScroll = min(limit, m.resultScroll+max(1, m.height/2))
+		case "ctrl+u", "pgup":
+			m.resultScroll = max(0, m.resultScroll-max(1, m.height/2))
+		}
+		return m, nil
+	}
+	if m.mode == modeDuplicate {
+		if key == "esc" {
+			m.mode = modeNormal
+			return m, nil
+		}
+		for i, p := range importProviders() {
+			if key == fmt.Sprint(i+1) {
+				return m.startDuplicate(p)
+			}
+		}
+		return m, nil
 	}
 
 	switch m.mode {
@@ -232,6 +288,9 @@ func (m model) selectProvider() (tea.Model, tea.Cmd) {
 	if m.pickerCursor < len(m.providers) {
 		m.provider = m.providers[m.pickerCursor]
 		m.mode = modeNormal
+		m.projectCursor, m.sessionCursor, m.previewScroll = 0, 0, 0
+		m.activePanel = panelProjects
+		m.marked = make(map[string]bool)
 		m.loadProjects()
 	}
 	return m, nil
@@ -239,6 +298,32 @@ func (m model) selectProvider() (tea.Model, tea.Cmd) {
 
 func (m model) handleNormal(key string) (tea.Model, tea.Cmd) {
 	switch key {
+	case "space":
+		if m.activePanel != panelProjects && m.hasSelectedSession() {
+			s := m.selectedSession()
+			id := s.FilePath + ":" + s.ID
+			m.marked[id] = !m.marked[id]
+		}
+		return m, nil
+	case "e":
+		sessions := m.actionSessions()
+		if len(sessions) == 0 {
+			return m, nil
+		}
+		label := sessions[0].DisplayName()
+		if m.activePanel == panelProjects {
+			label = m.projects[m.projectCursor].Path
+		}
+		m.busy = true
+		return m, func() tea.Msg {
+			path, err := exportSessions(m.exportDir, label, sessions)
+			return actionResultMsg{text: fmt.Sprintf("Exported %d chat(s)\n\n%s", len(sessions), path), err: err}
+		}
+	case "c":
+		if len(m.actionSessions()) > 0 {
+			m.mode = modeDuplicate
+		}
+		return m, nil
 	case "q":
 		return m, tea.Quit
 
@@ -375,7 +460,8 @@ func (m model) handleRenameInput(msg tea.KeyPressMsg, key string) (tea.Model, te
 		return m, nil
 	case "backspace":
 		if len(m.renameInput) > 0 {
-			m.renameInput = m.renameInput[:len(m.renameInput)-1]
+			runes := []rune(m.renameInput)
+			m.renameInput = string(runes[:len(runes)-1])
 		}
 		return m, nil
 	default:
@@ -392,12 +478,13 @@ func (m *model) moveCursor(delta int) {
 		m.projectCursor = clamp(m.projectCursor+delta, 0, max(0, len(m.projects)-1))
 		m.sessionCursor = 0
 		m.previewScroll = 0
+		clear(m.marked)
 	case panelSessions:
 		sessions := m.currentSessions()
 		m.sessionCursor = clamp(m.sessionCursor+delta, 0, max(0, len(sessions)-1))
 		m.previewScroll = 0
 	case panelPreview:
-		m.previewScroll = max(0, m.previewScroll+delta)
+		m.previewScroll = clamp(m.previewScroll+delta, 0, m.maxPreviewScroll())
 	}
 }
 
@@ -406,7 +493,7 @@ func (m model) halfPage() int {
 }
 
 func (m model) panelInnerHeight() int {
-	return max(m.height-4, 1)
+	return max(m.height-6, 1)
 }
 
 func (m model) currentSessions() []Session {
@@ -453,14 +540,47 @@ func (m model) View() tea.View {
 	}
 
 	if m.err != nil {
-		v := tea.NewView(fmt.Sprintf("Error loading sessions: %v\n\nPress q to quit.", m.err))
+		v := tea.NewView(fitContent(wordWrap(fmt.Sprintf("Error loading sessions: %v\n\nEsc to choose another provider. q to quit.", m.err), m.width), m.width, m.height))
 		v.AltScreen = true
 		return v
 	}
 
 	th := m.th
 
-	panelOuterHeight := max(m.height-2, 3)
+	if m.width < 16 || m.height < 8 {
+		v := tea.NewView(fitContent("Resize terminal\nq quit", m.width, m.height))
+		v.AltScreen = true
+		return v
+	}
+	if m.mode == modeDuplicate || m.mode == modeResult || m.mode == modeRename || m.mode == modeConfirmDelete || m.busy {
+		content := "Working..."
+		if m.mode == modeConfirmDelete && m.hasSelectedSession() {
+			content = "Delete chat?\n\n" + singleLine(m.selectedSession().DisplayName()) + "\n\nThis permanently removes the source chat.\n\ny delete · n or Esc cancel"
+		}
+		if m.mode == modeRename {
+			content = "Rename chat\n\n" + m.renameInput + "█\n\nEnter save · Esc cancel"
+		}
+		if m.mode == modeDuplicate {
+			content = fmt.Sprintf("Duplicate %d chat(s)\n\n", len(m.actionSessions()))
+			for i, p := range importProviders() {
+				content += fmt.Sprintf("%d  %s\n", i+1, p.Name())
+			}
+			content += "\nRestores native state within the same provider.\nTranslates structured history across providers.\n\nEsc cancel"
+		}
+		if m.mode == modeResult {
+			lines := strings.Split(wordWrap(m.result, max(1, m.width-4)), "\n")
+			start := min(m.resultScroll, max(0, len(lines)-1))
+			content = fitContent(strings.Join(lines[start:], "\n"), m.width-2, max(1, m.height-4)) + "\n\nj/k scroll · Enter or Esc return"
+		}
+		if m.mode != modeResult {
+			content = wordWrap(content, m.width-4)
+		}
+		box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(th.borderFoc).Render(fitContent(content, m.width-2, m.height-2))
+		v := tea.NewView(box)
+		v.AltScreen = true
+		return v
+	}
+	panelOuterHeight := m.height - 4
 	panelInnerHeight := panelOuterHeight - 2
 
 	projectOuter := m.width * 25 / 100
@@ -470,14 +590,6 @@ func (m model) View() tea.View {
 	projectInner := clamp(projectOuter-2, 1, m.width)
 	sessionInner := clamp(sessionOuter-2, 1, m.width)
 	previewInner := clamp(previewOuter-2, 1, m.width)
-
-	projectContent := m.renderProjectPanel(projectInner, panelInnerHeight)
-	sessionContent := m.renderSessionPanel(sessionInner, panelInnerHeight)
-	previewContent := m.renderPreviewPanel(previewInner, panelInnerHeight)
-
-	projectContent = fitContent(projectContent, projectInner, panelInnerHeight)
-	sessionContent = fitContent(sessionContent, sessionInner, panelInnerHeight)
-	previewContent = fitContent(previewContent, previewInner, panelInnerHeight)
 
 	makeBorder := func(active bool) lipgloss.Style {
 		bc := th.border
@@ -489,22 +601,44 @@ func (m model) View() tea.View {
 			BorderForeground(bc)
 	}
 
-	projectBox := makeBorder(m.activePanel == panelProjects).Render(projectContent)
-	sessionBox := makeBorder(m.activePanel == panelSessions).Render(sessionContent)
-	previewBox := makeBorder(m.activePanel == panelPreview).Render(previewContent)
-
-	panels := lipgloss.JoinHorizontal(lipgloss.Top, projectBox, sessionBox, previewBox)
+	var panels string
+	if m.width < 110 {
+		inner := m.width - 2
+		var content string
+		switch m.activePanel {
+		case panelProjects:
+			content = m.renderProjectPanel(inner, panelInnerHeight)
+		case panelSessions:
+			content = m.renderSessionPanel(inner, panelInnerHeight)
+		case panelPreview:
+			content = m.renderPreviewPanel(inner, panelInnerHeight)
+		}
+		panels = makeBorder(true).Render(fitContent(content, inner, panelInnerHeight))
+	} else {
+		projectContent := fitContent(m.renderProjectPanel(projectInner, panelInnerHeight), projectInner, panelInnerHeight)
+		sessionContent := fitContent(m.renderSessionPanel(sessionInner, panelInnerHeight), sessionInner, panelInnerHeight)
+		previewContent := fitContent(m.renderPreviewPanel(previewInner, panelInnerHeight), previewInner, panelInnerHeight)
+		projectBox := makeBorder(m.activePanel == panelProjects).Render(projectContent)
+		sessionBox := makeBorder(m.activePanel == panelSessions).Render(sessionContent)
+		previewBox := makeBorder(m.activePanel == panelPreview).Render(previewContent)
+		panels = lipgloss.JoinHorizontal(lipgloss.Top, projectBox, sessionBox, previewBox)
+	}
 
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(th.titleFg).
 		Background(th.titleBg).
 		Padding(0, 1)
-	title := titleStyle.Render(fmt.Sprintf(" %s Session Manager ", m.providerName()))
+	title := titleStyle.Render(fitContent(fmt.Sprintf("%s / Session Manager", m.providerName()), max(1, m.width-2), 1))
+	context := fmt.Sprintf(" %d folders · %d chats", len(m.projects), len(m.currentSessions()))
+	if len(m.projects) > 0 {
+		context += " · " + singleLine(m.projects[m.projectCursor].Path)
+	}
+	context = lipgloss.NewStyle().Foreground(th.fgDim).Render(fitContent(context, m.width, 1))
 
 	statusBar := m.renderStatusBar()
 
-	view := lipgloss.JoinVertical(lipgloss.Left, title, panels, statusBar)
+	view := lipgloss.JoinVertical(lipgloss.Left, title, context, panels, statusBar)
 
 	v := tea.NewView(view)
 	v.AltScreen = true
@@ -553,12 +687,12 @@ func (m model) renderProviderPicker() string {
 	b.WriteString("\n")
 	b.WriteString(dimStyle.Render("  ↵ select  q quit"))
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, b.String())
+	return fitContent(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, b.String()), m.width, m.height)
 }
 
 func (m model) renderProjectPanel(width, height int) string {
 	th := m.th
-	header := lipgloss.NewStyle().Foreground(th.fgMuted).Render("PROJECTS")
+	header := lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render("FOLDERS")
 	sep := lipgloss.NewStyle().Foreground(th.border).Render(strings.Repeat("─", width))
 
 	var lines []string
@@ -573,7 +707,7 @@ func (m model) renderProjectPanel(width, height int) string {
 	maxVisible := height - 2
 	startIdx := scrollOffset(m.projectCursor, maxVisible, len(m.projects))
 
-	selectedStyle := lipgloss.NewStyle().Foreground(th.accent).Bold(true)
+	selectedStyle := lipgloss.NewStyle().Foreground(th.accent).Background(th.accentDim).Bold(true)
 	normalStyle := lipgloss.NewStyle().Foreground(th.fg)
 	countStyle := lipgloss.NewStyle().Foreground(th.fgDim)
 
@@ -583,7 +717,7 @@ func (m model) renderProjectPanel(width, height int) string {
 		count := countStyle.Render(fmt.Sprintf(" (%d)", len(proj.Sessions)))
 
 		if i == m.projectCursor {
-			lines = append(lines, selectedStyle.Render("▸ "+display)+count)
+			lines = append(lines, selectedStyle.Render(fitContent(fmt.Sprintf("▸ %s (%d)", display, len(proj.Sessions)), width, 1)))
 		} else {
 			lines = append(lines, normalStyle.Render("  "+display)+count)
 		}
@@ -594,7 +728,7 @@ func (m model) renderProjectPanel(width, height int) string {
 
 func (m model) renderSessionPanel(width, height int) string {
 	th := m.th
-	header := lipgloss.NewStyle().Foreground(th.fgMuted).Render("SESSIONS")
+	header := lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render("CHATS · space to mark")
 	sep := lipgloss.NewStyle().Foreground(th.border).Render(strings.Repeat("─", width))
 
 	var lines []string
@@ -610,19 +744,27 @@ func (m model) renderSessionPanel(width, height int) string {
 	maxVisible := height - 2
 	startIdx := scrollOffset(m.sessionCursor, maxVisible, len(sessions))
 
-	selectedStyle := lipgloss.NewStyle().Foreground(th.accent).Bold(true)
+	selectedStyle := lipgloss.NewStyle().Foreground(th.accent).Background(th.accentDim).Bold(true)
 	normalStyle := lipgloss.NewStyle().Foreground(th.fg)
 	ageStyle := lipgloss.NewStyle().Foreground(th.fgDim)
 
 	for i := startIdx; i < len(sessions) && i-startIdx < maxVisible; i++ {
 		sess := sessions[i]
-		name := sess.DisplayName()
+		name := singleLine(sess.DisplayName())
 		age := ageStyle.Render(" " + formatAge(sess.Timestamp))
+		name = ansi.Truncate(name, max(1, width-lipgloss.Width(age)-2), "…")
+		marker := "▸ "
+		if m.marked[sess.FilePath+":"+sess.ID] {
+			marker = "✓ "
+		}
 
 		if i == m.sessionCursor {
-			lines = append(lines, selectedStyle.Render("▸ "+name)+age)
+			lines = append(lines, selectedStyle.Render(fitContent(marker+name+" "+formatAge(sess.Timestamp), width, 1)))
 		} else {
-			lines = append(lines, normalStyle.Render("  "+name)+age)
+			if marker != "✓ " {
+				marker = "  "
+			}
+			lines = append(lines, normalStyle.Render(marker+name)+age)
 		}
 	}
 
@@ -631,7 +773,7 @@ func (m model) renderSessionPanel(width, height int) string {
 
 func (m model) renderPreviewPanel(width, height int) string {
 	th := m.th
-	header := lipgloss.NewStyle().Foreground(th.fgMuted).Render("PREVIEW")
+	header := lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render("CONVERSATION")
 	sep := lipgloss.NewStyle().Foreground(th.border).Render(strings.Repeat("─", width))
 
 	var lines []string
@@ -650,25 +792,9 @@ func (m model) renderPreviewPanel(width, height int) string {
 	lines = append(lines, metaStyle.Render(fmt.Sprintf("Time: %s", sess.Timestamp.Local().Format("2006-01-02 15:04"))))
 	lines = append(lines, sep)
 
-	userStyle := lipgloss.NewStyle().Foreground(th.user).Bold(true)
-	asstStyle := lipgloss.NewStyle().Foreground(th.assistant)
-	asstLabel := m.providerName()
+	msgLines := m.previewLines(width)
 
-	var msgLines []string
-	for _, msg := range sess.Messages {
-		if msg.Role == "user" {
-			msgLines = append(msgLines, userStyle.Render("▶ You:"))
-		} else {
-			msgLines = append(msgLines, asstStyle.Render("◀ "+asstLabel+":"))
-		}
-		wrapped := wordWrap(msg.Content, width-2)
-		for l := range strings.SplitSeq(wrapped, "\n") {
-			msgLines = append(msgLines, "  "+l)
-		}
-		msgLines = append(msgLines, "")
-	}
-
-	scroll := min(m.previewScroll, len(msgLines))
+	scroll := min(m.previewScroll, max(0, len(msgLines)-max(1, height-len(lines))))
 	msgLines = msgLines[scroll:]
 
 	avail := height - len(lines)
@@ -682,12 +808,6 @@ func (m model) renderPreviewPanel(width, height int) string {
 
 func (m model) renderStatusBar() string {
 	th := m.th
-	barStyle := lipgloss.NewStyle().
-		Foreground(th.statusFg).
-		Background(th.statusBg).
-		Padding(0, 1).
-		Width(m.width - 2)
-
 	keyStyle := lipgloss.NewStyle().
 		Foreground(th.accent).
 		Background(th.statusBg).
@@ -768,12 +888,21 @@ func (m model) renderStatusBar() string {
 		}
 	}
 
-	return barStyle.Render(status)
+	first := fitContent(status, m.width, 1)
+	second := " e export chat · c duplicate · space mark · tab panels"
+	if m.activePanel == panelProjects {
+		second = " e export folder · c duplicate folder · tab panels"
+	}
+	if m.mode != modeNormal {
+		second = ""
+	}
+	return lipgloss.NewStyle().Foreground(th.statusFg).Background(th.statusBg).Render(first + "\n" + fitContent(second, m.width, 1))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 func fitContent(s string, width, height int) string {
+	width, height = max(0, width), max(0, height)
 	lines := strings.Split(s, "\n")
 
 	out := make([]string, height)
@@ -817,19 +946,20 @@ func scrollOffset(cursor, visible, total int) int {
 }
 
 func shortenPath(path string, maxLen int) string {
+	path = singleLine(path)
 	if maxLen < 5 {
 		maxLen = 5
 	}
-	if len(path) <= maxLen {
+	if lipgloss.Width(path) <= maxLen {
 		return path
 	}
 	parts := strings.Split(path, "/")
 	if len(parts) <= 2 {
-		return path[:maxLen-1] + "…"
+		return ansi.Truncate(path, maxLen, "…")
 	}
 	short := "…/" + strings.Join(parts[len(parts)-2:], "/")
-	if len(short) > maxLen {
-		return short[:maxLen-1] + "…"
+	if lipgloss.Width(short) > maxLen {
+		return ansi.Truncate(short, maxLen, "…")
 	}
 	return short
 }
@@ -853,38 +983,97 @@ func formatAge(t time.Time) string {
 }
 
 func wordWrap(s string, width int) string {
-	if width <= 0 {
-		return s
-	}
-	var result strings.Builder
-	for line := range strings.SplitSeq(s, "\n") {
-		if len(line) <= width {
-			if result.Len() > 0 {
-				result.WriteByte('\n')
-			}
-			result.WriteString(line)
-			continue
+	return ansi.Hardwrap(terminalText(s), max(1, width), true)
+}
+
+// Strip terminal control sequences from stored chat content before rendering.
+func terminalText(s string) string {
+	s = strings.ReplaceAll(ansi.Strip(s), "\t", "    ")
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r >= 32 && r != 127 {
+			return r
 		}
-		words := strings.Fields(line)
-		currentLen := 0
-		first := true
-		for _, word := range words {
-			if currentLen+len(word)+1 > width && !first {
-				result.WriteByte('\n')
-				currentLen = 0
-				first = true
-			}
-			if !first {
-				result.WriteByte(' ')
-				currentLen++
-			}
-			result.WriteString(word)
-			currentLen += len(word)
-			first = false
-		}
-		result.WriteByte('\n')
+		return -1
+	}, s)
+}
+
+func singleLine(s string) string {
+	return strings.Join(strings.Fields(terminalText(s)), " ")
+}
+
+func (m model) previewWidth() int {
+	if m.width < 110 {
+		return max(1, m.width-2)
 	}
-	return strings.TrimRight(result.String(), "\n")
+	return max(1, m.width-m.width*25/100-m.width*30/100-2)
+}
+
+func (m model) previewLines(width int) []string {
+	if !m.hasSelectedSession() {
+		return nil
+	}
+	var lines []string
+	for _, msg := range m.selectedSession().Messages {
+		label := lipgloss.NewStyle().Foreground(m.th.assistant).Bold(true).Render("◀ " + m.providerName())
+		if msg.Role == "user" {
+			label = lipgloss.NewStyle().Foreground(m.th.user).Bold(true).Render("▶ You")
+		}
+		lines = append(lines, label)
+		for line := range strings.SplitSeq(wordWrap(msg.Content, max(1, width-2)), "\n") {
+			lines = append(lines, "  "+line)
+		}
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+func (m model) maxPreviewScroll() int {
+	return max(0, len(m.previewLines(m.previewWidth()))-max(1, m.panelInnerHeight()-5))
+}
+
+func (m model) actionSessions() []Session {
+	if m.activePanel == panelProjects {
+		return append([]Session(nil), m.currentSessions()...)
+	}
+	var selected []Session
+	for _, s := range m.currentSessions() {
+		if m.marked[s.FilePath+":"+s.ID] {
+			selected = append(selected, s)
+		}
+	}
+	if len(selected) > 0 {
+		return selected
+	}
+	if m.hasSelectedSession() {
+		return []Session{m.selectedSession()}
+	}
+	return nil
+}
+
+func (m model) startDuplicate(target SessionProvider) (tea.Model, tea.Cmd) {
+	sessions := m.actionSessions()
+	m.busy = true
+	m.mode = modeNormal
+	return m, func() tea.Msg {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		var result strings.Builder
+		fmt.Fprintf(&result, "Copied to %s. Resume from the original project directory.\n", target.Name())
+		for i, s := range sessions {
+			copy, err := duplicateSession(s, target, home)
+			if err != nil {
+				fmt.Fprintf(&result, "\nStopped after %d of %d chats: %v", i, len(sessions), err)
+				return actionResultMsg{text: result.String()}
+			}
+			fmt.Fprintf(&result, "\n%s [%s]\n  %s\n", singleLine(s.DisplayName()), copy.Mode, copy.Resume)
+			for _, warning := range copy.Warnings {
+				fmt.Fprintf(&result, "  Notice: %s\n", singleLine(warning))
+			}
+		}
+		return actionResultMsg{text: result.String()}
+	}
 }
 
 func clamp(v, lo, hi int) int {
@@ -900,8 +1089,29 @@ func clamp(v, lo, hi int) int {
 // ── Main ────────────────────────────────────────────────────────────
 
 func main() {
-	providerFlag := flag.String("provider", "", "Provider name (e.g. 'claude', 'codex'). Skips the picker.")
+	providerFlag := flag.String("provider", "", "Provider ID. Skips the picker.")
+	importFlag := flag.Bool("import", false, "Restore native state or translate an exported ZIP.")
+	harnessFlag := flag.String("harness", "", "Provider ID of the import destination.")
 	flag.Parse()
+	if *importFlag {
+		if flag.NArg() != 1 || *harnessFlag == "" {
+			fmt.Fprintln(os.Stderr, "Usage: agent-session-manager --import --harness=<provider> ./chats.zip")
+			os.Exit(2)
+		}
+		home, err := os.UserHomeDir()
+		if err == nil {
+			err = importArchive(flag.Arg(0), *harnessFlag, home, os.Stdout)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Import failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *harnessFlag != "" || flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "Use --import --harness=<provider> with a ZIP path")
+		os.Exit(2)
+	}
 
 	m := initialModel(*providerFlag)
 	p := tea.NewProgram(m)

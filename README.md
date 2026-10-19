@@ -3,8 +3,8 @@
 
 # Agent Session Manager
 
-A terminal UI for browsing, previewing, deleting, and renaming your coding agent
-sessions.
+A terminal UI for browsing, previewing, exporting, importing, duplicating,
+deleting, and renaming coding agent sessions.
 
 Built with [Bubbletea v2](https://charm.land/bubbletea/v2),
 [Lipgloss v2](https://charm.land/lipgloss/v2), and
@@ -58,6 +58,12 @@ cd agent-session-manager
 go build -o agent-session-manager .
 ```
 
+Building requires Go 1.26.2 or newer. Nix users can optionally use the pinned
+flake through `nix develop` or direnv. The shell includes Go, Git, Python,
+Codex, Claude Code, Forge Code, and ZIP tools
+on macOS and Linux. Claude Code's unfree package is allowed specifically for
+this shell.
+
 ## Usage
 
 ```bash
@@ -84,10 +90,80 @@ The `--provider` flag matches against provider names case-insensitively.
 | `Esc`               | Projects   | Back to provider picker                  |
 | `d`                 | Sessions   | Delete session (with confirmation)       |
 | `r`                 | Sessions   | Rename session (if provider supports it) |
+| `e`                 | Projects   | Export every chat in the selected folder to a ZIP |
+| `e`                 | Chat/preview | Export the selected or marked chats to a ZIP |
+| `Space`             | Sessions   | Mark/unmark chats for export or duplication |
+| `c`                 | All panels | Choose a harness and duplicate the current selection |
 | `d` / `u`           | Preview    | Half-page down/up                        |
 | `Ctrl+d` / `Ctrl+u` | All panels | Half-page down/up                        |
 | `Tab` / `Shift+Tab` | All panels | Cycle panel focus                        |
-| `q` / `Ctrl+c`      | Anywhere   | Quit                                     |
+| `q`                 | Browsing   | Quit                                     |
+| `Ctrl+c`            | Anywhere   | Quit                                     |
+
+At widths below 110 columns, the focused panel fills the terminal. Use Enter,
+Esc, or Tab to move between folders, chats, and conversation previews. Wider
+terminals show all three panels. Action results stay visible until Enter or
+Esc; use `j`/`k` or the arrow keys to scroll long lists of resume commands.
+
+## Export, import, and duplication
+
+Press `e` on a folder to export all its chats, or on a chat to export that chat.
+Mark several chats with Space to export or duplicate them together. Marks apply
+to the current folder and clear when you change folders. ZIPs are written to the
+directory where the manager was started, with unique names and private file
+permissions.
+
+Each chat has a structured transcript in `conversation.md`, a portable
+`conversation.json`, and its native source records under `native/`. Native
+records include session-owned support files and selected database rows, with
+their schemas. Shared databases are filtered to the selected conversations.
+Export fails if a source cannot be read and removes the partial ZIP.
+
+Import an exported ZIP without starting the terminal UI:
+
+```bash
+agent-session-manager --import --harness="codex" ./path/to/file.zip
+agent-session-manager --import --harness="claude" ./path/to/file.zip
+agent-session-manager --import --harness="forge" ./path/to/file.zip
+```
+
+Press `c` in the UI for the same conversion directly from a selected folder,
+chat, or marked chats. Choose the destination from the provider picker. Each
+chat becomes an independent native session with a fresh ID. The result shows
+the resume command to run from the chat's original project directory.
+
+Import into the source harness restores the original IDs, native records,
+session metadata, and captured support files. Only references to session-owned
+storage paths change when the destination home differs. Identical imports are
+idempotent; conflicting existing records cause an error rather than an overwrite.
+The UI's duplicate action deliberately creates a new ID, including within the
+same harness.
+
+Cross-harness import translates full history, instructions, tool definitions,
+tool calls and results, errors, readable reasoning, and supported media. When a
+destination lacks an equivalent field, the importer preserves readable content
+as contextual messages and reports limitations. Claude imports promote media
+inside tool results into adjacent user media blocks because its CLI otherwise
+omits that media from outgoing model requests. A portable sidecar retains the
+original structured meaning, while `.session-manager/<id>/original/` retains the
+source native bundle for information that cannot become active destination state.
+The sidecar is ignored if subsequent native edits invalidate its history prefix.
+
+All three harnesses support export, import, and duplication. Both single-chat
+and folder ZIPs use the same import command. Original sessions remain in place.
+A batch failure reports how many chats were already imported; successful imports
+remain available. Repository files, global configuration, credentials, and running
+processes are external to the chat backup. A restored session still needs its
+working directory and any configured model provider to be available.
+
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are respected for both browsing and import.
+`FORGE_CONFIG` selects the Forge Code configuration directory. Codex forks with
+inherited history include the saved parent prefix, excluding later parent
+messages. Their ZIP includes those bounded native parent records.
+Chats need an absolute project path for cross-harness import. ZIPs must contain
+the manager's portable `conversation.json` records. Import reads them without
+extracting archive paths and accepts at most 2 GiB of uncompressed archive content
+and 10,000 chats.
 
 ## Architecture
 
@@ -97,6 +173,11 @@ claude.go     ← Claude Code provider implementation
 codex.go      ← Codex provider implementation
 forge.go      ← Forge Code provider implementation
 main.go       ← Bubbletea UI (model, update, view, helpers)
+export.go     ← Portable ZIP writer and archive file helpers
+import.go     ← Portable ZIP reader and CLI import orchestration
+duplicate.go  ← Portable validation and native file writing helper
+*_transfer.go ← Provider-owned native capture, restore, and translation
+transfer_*.go ← Shared content, file, and SQLite utilities
 ```
 
 ### The `SessionProvider` interface (`provider.go`)
@@ -105,14 +186,22 @@ Every provider implements this interface:
 
 ```go
 type SessionProvider interface {
+    ID() string                                            // CLI identifier
     Name() string                                          // display name
     Description() string                                   // hint for picker (e.g. path)
     LoadProjects() ([]Project, error)                      // discover sessions grouped by project
     DeleteSession(session Session) error                   // remove session files
     RenameSession(session Session, newName string) error   // change display name
     CanRename() bool                                       // whether rename is supported
+    CaptureSession(session Session) (SessionTransfer, error)
+    CanImport() bool
+    ImportSession(transfer SessionTransfer, home string, duplicate bool) (duplicateResult, error)
 }
 ```
+
+Native formats, storage paths, and resume commands belong to the provider
+implementations. Shared export/import code calls these interface methods, and
+the destination picker lists providers for which `CanImport()` returns true.
 
 Providers are registered in `AllProviders()` at the top of `provider.go`. The UI
 reads this slice — it never references provider types directly. The picker,
@@ -123,7 +212,9 @@ from the interface.
 
 - `Session` — parsed session with ID, slug, messages, timestamps, file path, and
   `ProviderName` string
-- `ChatMessage` — role + content + timestamp
+- `ChatMessage` — role, content blocks, timestamp, model, and phase
+- `ContentBlock` — text, reasoning, calls, results, and media
+- `SessionTransfer` — portable session, opaque native files, and notices
 - `Project` — groups sessions by working directory path
 - `Session.DisplayName()` — returns slug, falls back to first user message
   (truncated to 50 chars), then session ID prefix
@@ -174,13 +265,18 @@ from the interface.
 - `modePickProvider` — initial provider selection screen
 - `modeNormal` — three-panel browsing (projects, sessions, preview)
 - `modeConfirmDelete` — awaiting `y`/`n` for deletion
-- `modeRename` — inline text input for new session name
+- `modeRename` — text input for a new session name
+- `modeDuplicate` — choose an import-capable destination provider
+- `modeResult` — scrollable export or duplication result
 
 **Panel system** (the `activePanel` field):
 
 - `panelProjects` (0) — left panel, 25% width
 - `panelSessions` (1) — middle panel, 30% width
 - `panelPreview` (2) — right panel, remaining width
+
+Below 110 columns, only the focused panel is rendered, at full terminal width.
+Rename, delete, destination selection, and results use full-screen dialogs.
 
 **Theme and light/dark mode:**
 
@@ -226,6 +322,7 @@ package main
 
 type CursorProvider struct{}
 
+func (c *CursorProvider) ID() string          { return "cursor" }
 func (c *CursorProvider) Name() string        { return "Cursor" }
 func (c *CursorProvider) Description() string { return "~/.cursor/sessions/" }
 func (c *CursorProvider) CanRename() bool     { return false }
@@ -245,6 +342,16 @@ func (c *CursorProvider) DeleteSession(session Session) error {
 
 func (c *CursorProvider) RenameSession(_ Session, _ string) error {
     return fmt.Errorf("cursor sessions cannot be renamed")
+}
+
+func (c *CursorProvider) CaptureSession(s Session) (SessionTransfer, error) {
+    return SessionTransfer{}, fmt.Errorf("cursor export is not implemented")
+}
+
+func (c *CursorProvider) CanImport() bool { return false }
+
+func (c *CursorProvider) ImportSession(_ SessionTransfer, _ string, _ bool) (duplicateResult, error) {
+    return duplicateResult{}, fmt.Errorf("cursor import is not supported")
 }
 ```
 
@@ -328,7 +435,7 @@ All other dependencies are transitive.
 
 ## Build
 
-Requires Go 1.24+.
+Requires Go 1.26.2+.
 
 ```bash
 go build -o agent-session-manager .

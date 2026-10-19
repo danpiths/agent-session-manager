@@ -21,6 +21,9 @@ func (c *ClaudeProvider) CanRename() bool     { return true }
 func (c *ClaudeProvider) LoadProjects() ([]Project, error) {
 	dir := filepath.Join(claudeDir(), "projects")
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading projects dir: %w", err)
 	}
@@ -42,7 +45,7 @@ func (c *ClaudeProvider) LoadProjects() ([]Project, error) {
 
 		projects = append(projects, Project{
 			ID:       entry.Name(),
-			Path:     claudeProjectIDToPath(entry.Name()),
+			Path:     sessions[0].Project,
 			Sessions: sessions,
 		})
 	}
@@ -72,11 +75,15 @@ func (c *ClaudeProvider) RenameSession(session Session, newName string) error {
 
 	var lines []json.RawMessage
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 2*1024*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), 128*1024*1024)
 	for scanner.Scan() {
 		raw := make(json.RawMessage, len(scanner.Bytes()))
 		copy(raw, scanner.Bytes())
 		lines = append(lines, raw)
+	}
+	if err := scanner.Err(); err != nil {
+		f.Close()
+		return fmt.Errorf("reading conversation: %w", err)
 	}
 	f.Close()
 
@@ -112,12 +119,15 @@ func (c *ClaudeProvider) RenameSession(session Session, newName string) error {
 // ── Internal ────────────────────────────────────────────────────────
 
 func claudeDir() string {
+	if root := os.Getenv("CLAUDE_CONFIG_DIR"); root != "" {
+		return root
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude")
 }
 
 func claudeProjectIDToPath(id string) string {
-	return strings.ReplaceAll(strings.TrimPrefix(id, "-"), "-", "/")
+	return strings.ReplaceAll(id, "-", "/")
 }
 
 func (c *ClaudeProvider) loadSessions(projDir, projectID string) ([]Session, error) {
@@ -144,6 +154,7 @@ func (c *ClaudeProvider) loadSessions(projDir, projectID string) ([]Session, err
 }
 
 type claudeJSONLLine struct {
+	CWD       string    `json:"cwd,omitempty"`
 	Type      string    `json:"type"`
 	Message   *msgField `json:"message,omitempty"`
 	Slug      string    `json:"slug,omitempty"`
@@ -170,11 +181,9 @@ func (c *ClaudeProvider) parseSession(path, sessionID, projectID string) (Sessio
 	}
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 2*1024*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), 128*1024*1024)
 
 	var lastTimestamp time.Time
-	messageCount := 0
-	const maxMessages = 50
 
 	for scanner.Scan() {
 		var line claudeJSONLLine
@@ -184,6 +193,9 @@ func (c *ClaudeProvider) parseSession(path, sessionID, projectID string) (Sessio
 
 		if line.Slug != "" && session.Slug == "" {
 			session.Slug = line.Slug
+		}
+		if line.CWD != "" {
+			session.Project = line.CWD
 		}
 
 		if line.Type != "user" && line.Type != "assistant" {
@@ -207,14 +219,14 @@ func (c *ClaudeProvider) parseSession(path, sessionID, projectID string) (Sessio
 			session.FirstMessage = content
 		}
 
-		if messageCount < maxMessages {
-			session.Messages = append(session.Messages, ChatMessage{
-				Role:      line.Message.Role,
-				Content:   content,
-				Timestamp: ts,
-			})
-		}
-		messageCount++
+		session.Messages = append(session.Messages, ChatMessage{
+			Role:      line.Message.Role,
+			Content:   content,
+			Timestamp: ts,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return Session{}, fmt.Errorf("reading conversation: %w", err)
 	}
 
 	if len(session.Messages) == 0 {
@@ -222,15 +234,18 @@ func (c *ClaudeProvider) parseSession(path, sessionID, projectID string) (Sessio
 	}
 
 	session.Timestamp = lastTimestamp
-	session.Project = claudeProjectIDToPath(projectID)
+	if session.Project == "" {
+		session.Project = claudeProjectIDToPath(projectID)
+	}
 	return session, nil
 }
 
 func extractContent(raw any) string {
 	switch v := raw.(type) {
 	case string:
-		return truncateStr(v, 500)
+		return v
 	case []any:
+		var texts []string
 		for _, item := range v {
 			m, ok := item.(map[string]any)
 			if !ok {
@@ -238,10 +253,14 @@ func extractContent(raw any) string {
 			}
 			if m["type"] == "text" {
 				if text, ok := m["text"].(string); ok {
-					return truncateStr(text, 500)
+					texts = append(texts, text)
 				}
 			}
 		}
+		return strings.Join(texts, "\n")
 	}
 	return ""
 }
+
+func (c *ClaudeProvider) ID() string      { return "claude" }
+func (c *ClaudeProvider) CanImport() bool { return true }

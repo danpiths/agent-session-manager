@@ -24,6 +24,9 @@ func (f *ForgeProvider) Description() string { return "~/.config/forgecode/.forg
 func (f *ForgeProvider) CanRename() bool     { return true }
 
 func (f *ForgeProvider) LoadProjects() ([]Project, error) {
+	if _, err := os.Stat(forgeDBPath()); os.IsNotExist(err) {
+		return nil, nil
+	}
 	db, err := sql.Open("sqlite", forgeDBPath())
 	if err != nil {
 		return nil, fmt.Errorf("opening forge database: %w", err)
@@ -173,7 +176,6 @@ func (f *ForgeProvider) parseConversation(conversationID string, workspaceID int
 	session.Project = projectPath
 	session.ProjectID = fmt.Sprintf("%d:%s", workspaceID, projectPath)
 
-	const maxMessages = 50
 	for _, msg := range ctx.Messages {
 		role, content := forgeMessageText(msg)
 		if content == "" {
@@ -187,13 +189,11 @@ func (f *ForgeProvider) parseConversation(conversationID string, workspaceID int
 		if normalizedRole == "user" && session.FirstMessage == "" {
 			session.FirstMessage = truncateStr(content, 500)
 		}
-		if len(session.Messages) < maxMessages {
-			session.Messages = append(session.Messages, ChatMessage{
-				Role:      normalizedRole,
-				Content:   truncateStr(content, 500),
-				Timestamp: timestamp,
-			})
-		}
+		session.Messages = append(session.Messages, ChatMessage{
+			Role:      normalizedRole,
+			Content:   content,
+			Timestamp: timestamp,
+		})
 	}
 
 	if len(session.Messages) == 0 {
@@ -204,6 +204,9 @@ func (f *ForgeProvider) parseConversation(conversationID string, workspaceID int
 }
 
 func forgeDBPath() string {
+	if root := os.Getenv("FORGE_CONFIG"); root != "" {
+		return filepath.Join(root, ".forge.db")
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "forgecode", ".forge.db")
 }
@@ -213,7 +216,7 @@ func forgeMessageText(msg forgeContextMessage) (string, string) {
 		return "", ""
 	}
 	role := strings.TrimSpace(msg.Message.Text.Role)
-	content := strings.TrimSpace(msg.Message.Text.Content)
+	content := msg.Message.Text.Content
 	return role, content
 }
 
@@ -244,3 +247,5 @@ func forgeProjectPath(messages []forgeContextMessage) string {
 	return ""
 }
 
+func (f *ForgeProvider) ID() string      { return "forge" }
+func (f *ForgeProvider) CanImport() bool { return true }
